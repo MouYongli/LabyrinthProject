@@ -1,11 +1,35 @@
 package uebung_parallelisierung.parallel;
 
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.List;
 
-public class LabyrinthPar extends Labyrinth {
+public class LabyrinthParChain extends Labyrinth {
+
+	class PointChain {
+		public int point;
+		public byte solver;
+		public int prev_point;
+
+		public PointChain(Point _point, byte _solver) {
+			point = (_point.x << 16) + _point.y;
+			solver = _solver;
+			prev_point = -1;
+		}
+
+		public PointChain(Point _point, byte _solver, PointChain _prev) {
+			point = (_point.x << 16) + _point.y;
+			solver = _solver;
+			prev_point = _prev.point;
+		}
+
+		public Point getPoint() {
+			return new Point(point >> 16, point & 0xFFFF);
+		}
+		
+		public Point getPrevPoint() {
+			return new Point(prev_point >> 16, prev_point & 0xFFFF);
+		}
+	}
 
 	private static final long serialVersionUID = 1L;
 
@@ -46,24 +70,18 @@ public class LabyrinthPar extends Labyrinth {
 	private static final byte FROM_END = (byte) 2;
 
 	// For each cell in the labyrinth: Has solve() visited it yet?
-	protected final byte[][] visited;
+	protected final PointChain[][] visited;
 
 	protected volatile Point meetingPoint = null;
-	
-	protected List<Thread> threads;
-	protected List<ArrayDeque<Point>> searchStartList;
-	protected List<ArrayDeque<Point>> searchEndList;
-	
-	public LabyrinthPar(Grid grid) {
-		super(grid);
-		this.strategyName = "Parallel with more threads";
 
-		// initially all 0
-		visited = new byte[grid.width][grid.height];
-		
-		threads = new ArrayList<Thread>(8);
-		searchStartList = new ArrayList<ArrayDeque<Point>>(4);
-		searchEndList = new ArrayList<ArrayDeque<Point>>(4);
+	protected Thread t;
+
+	public LabyrinthParChain(Grid grid) {
+		super(grid);
+		this.strategyName = "Parallel with linked list";
+
+		// initially all null
+		visited = new PointChain[grid.width][grid.height];
 	}
 
 	protected Direction[] getBiasedDirections(Point cur, Direction lastDir, Point goal) {
@@ -203,154 +221,100 @@ public class LabyrinthPar extends Labyrinth {
 	}
 
 	public Point[] solve() {
-		final ArrayDeque<Point> adStart = new ArrayDeque<Point>();
-		final ArrayDeque<Point> adEnd = new ArrayDeque<Point>();
+		final ArrayDeque<Point> resStart = new ArrayDeque<Point>();
+		final ArrayDeque<Point> resEnd = new ArrayDeque<Point>();
 
-		visited[grid.start.getX()][grid.start.getY()] = FROM_START;
-		visited[grid.end.getX()][grid.end.getY()] = FROM_END;
+		PointChain pcStart = new PointChain(grid.start, FROM_START);
+		PointChain pcEnd = new PointChain(grid.end, FROM_END);
+		visited[grid.start.getX()][grid.start.getY()] = pcStart;
+		visited[grid.end.getX()][grid.end.getY()] = pcEnd;
 
-		Point currentEnd = grid.end;
-		do {
-			List<Point> points = new ArrayList<Point>(4);
-			Direction[] dirs = getBiasedDirections(currentEnd, null, grid.start);
-			for (Direction directionToNeighbor : dirs) {
-				Point neighbor = currentEnd.getNeighbor(directionToNeighbor);
-				if (hasPassage(currentEnd, neighbor)) {
-					points.add(neighbor);
-					visited[neighbor.getX()][neighbor.getY()] = FROM_END;
-				}
-			}
-			adEnd.addLast(currentEnd);
-			if (points.size() == 1) {
-				Point neighbor = points.get(0);
-				currentEnd = neighbor;
-			} else {
-				for(Point neighbor : points) {
-					final ArrayDeque<Point> resEndThis = new ArrayDeque<Point>();
-					resEndThis.addAll(adEnd);
-					searchEndList.add(resEndThis);
-					Thread t = new Thread(() -> subsolve(neighbor, grid.start, FROM_END, resEndThis));
-					threads.add(t);
-				}
-				break;
-			}
-		} while (true);
-		
-		Point currentStart = grid.start;
-		do {
-			List<Point> points = new ArrayList<Point>(4);
-			Direction[] dirs = getBiasedDirections(currentStart, null, grid.end);
-			for (Direction directionToNeighbor : dirs) {
-				Point neighbor = currentStart.getNeighbor(directionToNeighbor);
-				if (hasPassage(currentStart, neighbor)) {
-					points.add(neighbor);
-					visited[neighbor.getX()][neighbor.getY()] = FROM_START;
-				}
-			}
-			adStart.addLast(currentStart);
-			if (points.size() == 1) {
-				Point neighbor = points.get(0);
-				currentStart = neighbor;
-			} else {
-				for(Point neighbor : points) {
-					final ArrayDeque<Point> resStartThis = new ArrayDeque<Point>();
-					resStartThis.addAll(adStart);
-					searchStartList.add(resStartThis);
-					Thread t = new Thread(() -> subsolve(neighbor, grid.end, FROM_START, resStartThis));
-					threads.add(t);
-				}
-				break;
-			}
-		} while (true);
+		t = new Thread(() -> subsolve(pcEnd, grid.start, FROM_END, resEnd));
+		t.start();
 
-		for(Thread t : threads) {
-			t.start();
-		}
-		
+		subsolve(pcStart, grid.end, FROM_START, resStart);
+
 		try {
-			for(Thread t : threads) {
-				t.join();
-			}
+			t.join();
 		} catch (Exception ex) {
 			ex.printStackTrace();
 		}
-		
-		ArrayDeque<Point> resStart = null;
-		ArrayDeque<Point> resEnd = null;
-		
-		for(ArrayDeque<Point> a : searchStartList) {
-			if(a.peekLast().equals(new Point(-1, -1))) {
-				a.removeLast();
-				resStart = a;
-				break;
-			}
+
+		if (!resStart.isEmpty()) {
+			return resStart.toArray(new Point[0]);
+		} else if (!resEnd.isEmpty()) {
+			return resEnd.toArray(new Point[0]);
 		}
-		for(ArrayDeque<Point> a : searchEndList) {
-			if(a.peekLast().equals(new Point(-1, -1))) {
-				a.removeLast();
-				resEnd = a;
-				break;
-			}
-		}
-		
-		Point[] res = new Point[resStart.size() + resEnd.size()];
-		int i = resStart.size();
-		resStart.toArray(res);
-		Iterator<Point> it = resEnd.descendingIterator();
-		while (it.hasNext()) {
-			res[i++] = it.next();
-		}
-		return res;
+		System.out.println(meetingPoint);
+		return new Point[0];
 	}
 
-	public ArrayDeque<Point> subsolve(final Point searchStart, final Point searchEnd, final byte subSolveNumber,
-			final ArrayDeque<Point> pathSoFar) {
+	public ArrayDeque<Point> subsolve(final PointChain searchStart, final Point searchEnd, final byte subSolveNumber,
+			ArrayDeque<Point> pathSoFar) {
 		// Used as a stack: Branches not yet taken; solver will backtrack to
 		// these branching points later
-		ArrayDeque<PointAndDirection> backtrackStack = new ArrayDeque<PointAndDirection>();
+		ArrayDeque<PointChain> openPointList = new ArrayDeque<PointChain>();
 
-		Point current = searchStart;
+		PointChain current = searchStart;
 
 		Direction lastDirection = null;
 
 		// Continue the search until a meeting point is found
 		while (meetingPoint == null) {
-			Point next = null;
-			Direction[] dirs = getBiasedDirections(current, lastDirection, searchEnd);
+			Point currentPoint = current.getPoint();
+			PointChain next = null;
+			Direction[] dirs = getBiasedDirections(currentPoint, lastDirection, searchEnd);
 			for (Direction directionToNeighbor : dirs) {
-				Point neighbor = current.getNeighbor(directionToNeighbor);
-				if (hasPassage(current, neighbor)) {
-					boolean gotIt = false;
+				Point neighbor = currentPoint.getNeighbor(directionToNeighbor);
+				if (hasPassage(currentPoint, neighbor)) {
 					synchronized (visited[neighbor.getX()]) {
+						PointChain pc = visited[neighbor.getX()][neighbor.getY()];
 						// I can visit this cell
-						if (visited[neighbor.getX()][neighbor.getY()] == 0) {
-							visited[neighbor.getX()][neighbor.getY()] = subSolveNumber;
-							gotIt = true;
+						if (pc == null) {
+							pc = new PointChain(neighbor, subSolveNumber, current);
+							visited[neighbor.getX()][neighbor.getY()] = pc;
+							if (next == null) {
+								next = pc;
+								lastDirection = directionToNeighbor;
+							} else {
+								openPointList.push(pc);
+							}
 							// We met, search over!
-						} else if (visited[neighbor.getX()][neighbor.getY()] != subSolveNumber) {
+						} else if (pc.solver != subSolveNumber) {
 							synchronized (visited) {
 								if (meetingPoint == null) {
 									meetingPoint = neighbor;
-									pathSoFar.addLast(current);
-									pathSoFar.addLast(new Point(-1, -1));
-									return pathSoFar;
-								}
-								// Avoid volatile reads from now on since meetingPoint can no longer change
-								final Point localMeetingPoint = meetingPoint;
-								if (visited[localMeetingPoint.getX()][localMeetingPoint.getY()] == subSolveNumber) {
-									pathSoFar.addLast(current);
-									if (current.equals(localMeetingPoint)) {
-										pathSoFar.addLast(new Point(-1, -1));
-										return pathSoFar;
+
+									if (subSolveNumber == FROM_START) {
+										PointChain tmp = pc;
+										pc = current;
+										current = tmp;
 									}
-									while (!hasPassage(pathSoFar.peekLast(), localMeetingPoint)) {
-										pathSoFar.removeLast();
-										if (pathSoFar.isEmpty()) {
-											return null;
-										}
+
+									// path from meetingPoint to the start
+									ArrayDeque<Point> pathSoFar2 = new ArrayDeque<Point>();
+									Point p = pc.getPoint();
+									pathSoFar2.addLast(p);
+									do {
+										p = pc.getPrevPoint();
+										pc = visited[p.x][p.y];
+										pathSoFar2.addLast(p);
+									} while (pc.prev_point != -1);
+
+									Iterator<Point> it = pathSoFar2.descendingIterator();
+									while (it.hasNext()) {
+										pathSoFar.addLast(it.next());
 									}
-									pathSoFar.addLast(localMeetingPoint);
-									pathSoFar.addLast(new Point(-1, -1));
+
+									// path from meetingPoint to the end
+									Point p2 = current.getPoint();
+									pathSoFar.addLast(p2);
+									do {
+										p2 = current.getPrevPoint();
+										current = visited[p2.x][p2.y];
+										pathSoFar.addLast(p2);
+									} while (current.prev_point != -1);
+
 									return pathSoFar;
 								} else {
 									return null;
@@ -358,61 +322,21 @@ public class LabyrinthPar extends Labyrinth {
 							}
 						}
 					}
-					if (gotIt) {
-						// 1st unvisited neighbor
-						if (next == null) {
-							next = neighbor;
-							lastDirection = directionToNeighbor;
-						} else {
-							backtrackStack.push(new PointAndDirection(current, directionToNeighbor));
-						}
-					}
 				}
 			}
 			// Advance to next cell, if any:
 			if (next != null) {
-				pathSoFar.addLast(current);
 				current = next;
 				// current has no unvisited neighbor: Backtrack, if possible
 			} else {
 				// No more backtracking available: No solution exists
-				if (backtrackStack.isEmpty()) {
+				if (openPointList.isEmpty())
 					return null;
-				}
-				// Backtrack: Continue with cell saved at latest branching
-				// point:
-				PointAndDirection pd = backtrackStack.pop();
-				Point branchingPoint = pd.getPoint();
-				// Remove the dead end from the top of pathSoFar, i.e. all cells
-				// after branchingPoint:
-				while (!pathSoFar.peekLast().equals(branchingPoint)) {
-					pathSoFar.removeLast();
-				}
-				Direction dir = pd.getDirectionToBranchingPoint();
-				current = branchingPoint.getNeighbor(dir);
-				lastDirection = dir;
+				current = openPointList.pop();
+				lastDirection = null;
 			}
 		}
 		// meetingPoint != null, search over!
-		// Avoid volatile reads from now on since meetingPoint can no longer change
-		final Point localMeetingPoint = meetingPoint;
-		if (visited[localMeetingPoint.getX()][localMeetingPoint.getY()] == subSolveNumber) {
-			pathSoFar.addLast(current);
-			if (current.equals(localMeetingPoint)) {
-				pathSoFar.addLast(new Point(-1, -1));
-				return pathSoFar;
-			}
-			while (!hasPassage(pathSoFar.peekLast(), localMeetingPoint)) {
-				pathSoFar.removeLast();
-				if (pathSoFar.isEmpty()) {
-					return null;
-				}
-			}
-			pathSoFar.addLast(localMeetingPoint);
-			pathSoFar.addLast(new Point(-1, -1));
-			return pathSoFar;
-		} else {
-			return null;
-		}
+		return null;
 	}
 }

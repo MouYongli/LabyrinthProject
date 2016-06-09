@@ -113,7 +113,7 @@ public class LabyrinthTester {
 			/**/
 			long[] list4 = new long[NUM_TRIES];
 			for (int i = 0; i < NUM_TRIES; i++) {
-				Labyrinth labyrinth = new LabyrinthPar4(grid);
+				Labyrinth labyrinth = new LabyrinthParSplit(grid);
 				list4[i] = testLabyrinthSolving(labyrinth);
 			}
 			long median4 = getMedian(list4); 
@@ -138,6 +138,6 @@ public class LabyrinthTester {
 		//System.out.println("Sequentiell original - Median: " + res1M + "ms, Durchschnitt: " + res1A + " ms");
 		//System.out.println("Sequentiell verbessert - Median: " + res2M + "ms, Durchschnitt: " + res2A + " ms");
 		System.out.println("Parallel - Median: " + res3M + "ms, Durchschnitt: " + res3A + " ms");
-		System.out.println("Parallel 4 - Median: " + res4M + "ms, Durchschnitt: " + res4A + " ms");
+		System.out.println("Parallel, splitted - Median: " + res4M + "ms, Durchschnitt: " + res4A + " ms");
 	}
 }

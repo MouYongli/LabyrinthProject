@@ -4,8 +4,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 
-public class LabyrinthPar4 extends Labyrinth {
+public class LabyrinthParSplit extends Labyrinth {
 
 	private static final long serialVersionUID = 1L;
 
@@ -50,20 +51,26 @@ public class LabyrinthPar4 extends Labyrinth {
 
 	protected volatile Point meetingPoint = null;
 
-	protected List<Thread> threads;
-	protected List<ArrayDeque<Point>> searchStartList;
-	protected List<ArrayDeque<Point>> searchEndList;
-	
-	public LabyrinthPar4(Grid grid) {
+	protected final List<Thread> threads;
+	protected final List<ArrayDeque<Point>> searchStartList;
+	protected final List<ArrayDeque<Point>> searchEndList;
+
+	protected final CountDownLatch searchOverSignal;
+
+	protected final int NUM_CORES = Runtime.getRuntime().availableProcessors();
+
+	public LabyrinthParSplit(Grid grid) {
 		super(grid);
-		this.strategyName = "Parallel with more threads";
+		this.strategyName = "Parallel with more threads, splitted";
 
 		// initially all 0
 		visited = new byte[grid.width][grid.height];
-		
-		threads = new ArrayList<Thread>(8);
-		searchStartList = new ArrayList<ArrayDeque<Point>>(4);
-		searchEndList = new ArrayList<ArrayDeque<Point>>(4);
+
+		threads = new ArrayList<Thread>();
+		searchStartList = new ArrayList<ArrayDeque<Point>>();
+		searchEndList = new ArrayList<ArrayDeque<Point>>();
+
+		searchOverSignal = new CountDownLatch(1);
 	}
 
 	protected Direction[] getBiasedDirections(Point cur, Direction lastDir, Point goal) {
@@ -217,26 +224,26 @@ public class LabyrinthPar4 extends Labyrinth {
 				Point neighbor = currentEnd.getNeighbor(directionToNeighbor);
 				if (hasPassage(currentEnd, neighbor)) {
 					points.add(neighbor);
+					visited[neighbor.getX()][neighbor.getY()] = FROM_END;
 				}
 			}
 			adEnd.addLast(currentEnd);
 			if (points.size() == 1) {
 				Point neighbor = points.get(0);
-				visited[neighbor.getX()][neighbor.getY()] = FROM_END;
 				currentEnd = neighbor;
 			} else {
-				for(Point neighbor : points) {
-					visited[neighbor.getX()][neighbor.getY()] = FROM_END;
+				for (Point neighbor : points) {
 					final ArrayDeque<Point> resEndThis = new ArrayDeque<Point>();
 					resEndThis.addAll(adEnd);
 					searchEndList.add(resEndThis);
-					Thread t = new Thread(() -> subsolve(neighbor, grid.start, FROM_END, resEndThis));
+					Thread t = new Thread(() -> subsolve(neighbor, grid.start, FROM_END, resEndThis,
+							new ArrayDeque<PointAndDirection>(), true));
 					threads.add(t);
 				}
 				break;
 			}
 		} while (true);
-		
+
 		Point currentStart = grid.start;
 		do {
 			List<Point> points = new ArrayList<Point>(4);
@@ -245,65 +252,56 @@ public class LabyrinthPar4 extends Labyrinth {
 				Point neighbor = currentStart.getNeighbor(directionToNeighbor);
 				if (hasPassage(currentStart, neighbor)) {
 					points.add(neighbor);
+					visited[neighbor.getX()][neighbor.getY()] = FROM_START;
 				}
 			}
 			adStart.addLast(currentStart);
 			if (points.size() == 1) {
 				Point neighbor = points.get(0);
-				visited[neighbor.getX()][neighbor.getY()] = FROM_START;
 				currentStart = neighbor;
 			} else {
-				for(Point neighbor : points) {
-					visited[neighbor.getX()][neighbor.getY()] = FROM_START;
+				for (Point neighbor : points) {
 					final ArrayDeque<Point> resStartThis = new ArrayDeque<Point>();
 					resStartThis.addAll(adStart);
 					searchStartList.add(resStartThis);
-					Thread t = new Thread(() -> subsolve(neighbor, grid.end, FROM_START, resStartThis));
+					Thread t = new Thread(() -> subsolve(neighbor, grid.end, FROM_START, resStartThis,
+							new ArrayDeque<PointAndDirection>(), true));
 					threads.add(t);
 				}
 				break;
 			}
 		} while (true);
 
-		for(Thread t : threads) {
+		for (Thread t : threads) {
 			t.start();
 		}
-		
+
 		try {
-			for(Thread t : threads) {
-				t.join();
-			}
-		} catch (Exception ex) {
-			ex.printStackTrace();
+			searchOverSignal.await();
+		} catch (InterruptedException ex) {
+
 		}
-		
+
 		ArrayDeque<Point> resStart = null;
 		ArrayDeque<Point> resEnd = null;
-		
-		for(ArrayDeque<Point> a : searchStartList) {
-			if(!a.peekLast().equals(new Point(-1, -1))) {
-				resStart = a;
-				break;
-			}
-		}
-		for(ArrayDeque<Point> a : searchEndList) {
-			if(!a.peekLast().equals(new Point(-1, -1))) {
-				resEnd = a;
-				break;
-			}
-		}
-		/*
-		System.out.println("Meeting point was " + meetingPoint);
-		
-		System.out.println("resStart.size() = " + resStart.size());
-		System.out.println("resEnd.size() = " + resEnd.size());
-		System.out.println("resEnd1.size() = " + resEnd1.size());
-		System.out.println("resEnd2.size() = " + resEnd2.size());
-		System.out.println("resEnd1.peekLast() = " + resEnd1.peekLast());
-		System.out.println("resEnd2.peekLast() = " + resEnd2.peekLast());
 
-		System.out.println(Thread.activeCount() + " threads running");
-		*/
+		synchronized (this) {
+			for (ArrayDeque<Point> a : searchStartList) {
+				if (a.peekLast().equals(new Point(-1, -1))) {
+					a.removeLast();
+					resStart = a;
+					break;
+				}
+			}
+			for (ArrayDeque<Point> a : searchEndList) {
+				if (a.peekLast().equals(new Point(-1, -1))) {
+					a.removeLast();
+					resEnd = a;
+					break;
+				}
+			}
+		}
+
 		Point[] res = new Point[resStart.size() + resEnd.size()];
 		int i = resStart.size();
 		resStart.toArray(res);
@@ -314,18 +312,44 @@ public class LabyrinthPar4 extends Labyrinth {
 		return res;
 	}
 
-	public ArrayDeque<Point> subsolve(final Point searchStart, final Point searchEnd, final byte subSolveNumber,
-			final ArrayDeque<Point> pathSoFar) {
-		// Used as a stack: Branches not yet taken; solver will backtrack to
-		// these branching points later
-		ArrayDeque<PointAndDirection> backtrackStack = new ArrayDeque<PointAndDirection>();
+	@Override
+	protected void afterSolve() {
+		try {
+			for (Thread t : threads) {
+				t.join();
+			}
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		}
+	}
 
+	public ArrayDeque<Point> subsolve(final Point searchStart, final Point searchEnd, final byte subSolveNumber,
+			final ArrayDeque<Point> pathSoFar, ArrayDeque<PointAndDirection> backtrackStack, boolean canSplit) {
 		Point current = searchStart;
 
 		Direction lastDirection = null;
 
 		// Continue the search until a meeting point is found
 		while (meetingPoint == null) {
+			if (canSplit && backtrackStack.size() > 100000) {
+				final ArrayDeque<Point> pathSoFar2 = pathSoFar.clone();
+				final Point current2 = pathSoFar2.peekLast();
+				final ArrayDeque<PointAndDirection> backtrackStack2 = backtrackStack;
+				backtrackStack = new ArrayDeque<PointAndDirection>();
+
+				synchronized (this) {
+					if (subSolveNumber == FROM_START) {
+						searchStartList.add(pathSoFar2);
+					} else {
+						searchEndList.add(pathSoFar2);
+					}
+				}
+
+				Thread t = new Thread(
+						() -> subsolve(current2, searchEnd, subSolveNumber, pathSoFar2, backtrackStack2, false));
+				threads.add(t);
+				t.start();
+			}
 			Point next = null;
 			Direction[] dirs = getBiasedDirections(current, lastDirection, searchEnd);
 			for (Direction directionToNeighbor : dirs) {
@@ -343,24 +367,32 @@ public class LabyrinthPar4 extends Labyrinth {
 								if (meetingPoint == null) {
 									meetingPoint = neighbor;
 									pathSoFar.addLast(current);
-									//System.out.println(subSolveNumber + " met someone at the meetingPoint");
+									pathSoFar.addLast(new Point(-1, -1));
 									return pathSoFar;
-								} /*
-									 * else if (visited[meetingPoint.getX()][
-									 * meetingPoint.getY()] == subSolveNumber) {
-									 * pathSoFar.addLast(current); if
-									 * (current.equals(meetingPoint)) { return
-									 * pathSoFar; } while (!pathSoFar.isEmpty()
-									 * && !hasPassage(pathSoFar.peekLast(),
-									 * meetingPoint)) { pathSoFar.removeLast();
-									 * } if (hasPassage(pathSoFar.peekLast(),
-									 * meetingPoint)) {
-									 * pathSoFar.addLast(meetingPoint); return
-									 * pathSoFar; } else { pathSoFar.addLast(new
-									 * Point(-1, -1)); return null; } } else {
-									 * pathSoFar.addLast(new Point(-1, -1));
-									 * return null; }
-									 */
+								}
+								// Avoid volatile reads from now on since
+								// meetingPoint can no longer change
+								final Point localMeetingPoint = meetingPoint;
+								if (visited[localMeetingPoint.getX()][localMeetingPoint.getY()] == subSolveNumber) {
+									pathSoFar.addLast(current);
+									if (current.equals(localMeetingPoint)) {
+										pathSoFar.addLast(new Point(-1, -1));
+										searchOverSignal.countDown();
+										return pathSoFar;
+									}
+									while (!hasPassage(pathSoFar.peekLast(), localMeetingPoint)) {
+										pathSoFar.removeLast();
+										if (pathSoFar.isEmpty()) {
+											return null;
+										}
+									}
+									pathSoFar.addLast(localMeetingPoint);
+									pathSoFar.addLast(new Point(-1, -1));
+									searchOverSignal.countDown();
+									return pathSoFar;
+								} else {
+									return null;
+								}
 							}
 						}
 					}
@@ -383,7 +415,6 @@ public class LabyrinthPar4 extends Labyrinth {
 			} else {
 				// No more backtracking available: No solution exists
 				if (backtrackStack.isEmpty()) {
-					pathSoFar.addLast(new Point(-1, -1));
 					return null;
 				}
 				// Backtrack: Continue with cell saved at latest branching
@@ -394,6 +425,9 @@ public class LabyrinthPar4 extends Labyrinth {
 				// after branchingPoint:
 				while (!pathSoFar.peekLast().equals(branchingPoint)) {
 					pathSoFar.removeLast();
+					if (pathSoFar.isEmpty()) {
+						return null;
+					}
 				}
 				Direction dir = pd.getDirectionToBranchingPoint();
 				current = branchingPoint.getNeighbor(dir);
@@ -401,23 +435,27 @@ public class LabyrinthPar4 extends Labyrinth {
 			}
 		}
 		// meetingPoint != null, search over!
-		if (visited[meetingPoint.getX()][meetingPoint.getY()] == subSolveNumber) {
-			//System.out.println("Meine pathSoFar.size() = " + pathSoFar.size());
+		// Avoid volatile reads from now on since meetingPoint can no longer
+		// change
+		final Point localMeetingPoint = meetingPoint;
+		if (visited[localMeetingPoint.getX()][localMeetingPoint.getY()] == subSolveNumber) {
 			pathSoFar.addLast(current);
-			if (current.equals(meetingPoint)) {
+			if (current.equals(localMeetingPoint)) {
+				pathSoFar.addLast(new Point(-1, -1));
+				searchOverSignal.countDown();
 				return pathSoFar;
 			}
-			while (!hasPassage(pathSoFar.peekLast(), meetingPoint)) {
+			while (!hasPassage(pathSoFar.peekLast(), localMeetingPoint)) {
 				pathSoFar.removeLast();
 				if (pathSoFar.isEmpty()) {
-					pathSoFar.addLast(new Point(-1, -1));
 					return null;
 				}
 			}
-			pathSoFar.addLast(meetingPoint);
+			pathSoFar.addLast(localMeetingPoint);
+			pathSoFar.addLast(new Point(-1, -1));
+			searchOverSignal.countDown();
 			return pathSoFar;
 		} else {
-			pathSoFar.addLast(new Point(-1, -1));
 			return null;
 		}
 	}

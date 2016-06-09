@@ -181,12 +181,18 @@ public abstract class Labyrinth extends JPanel {
 	public void displaySolution(JFrame frame) {
 		repaint();
 	}
+	
+	protected void afterSolve() {
+		return;
+	}
 
 	public long solveAndMeasure() {
 		long startTime = System.currentTimeMillis();
 		this.solution = this.solve();
 		long endTime = System.currentTimeMillis();
 
+		afterSolve();
+		
 		this.solvingTime = endTime - startTime;
 		return this.solvingTime;
 	}
